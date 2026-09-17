@@ -1,0 +1,185 @@
+services:
+
+  backend:
+    image: ${TCAR_DOCKER_REGISTRY}/car:${TCAR_VERSION}
+    restart: unless-stopped
+    mem_limit: 6g
+    mem_reservation: 512M
+    cpus: 4
+    # user: "$UID:$GID"
+    volumes:
+      # persist car logs
+      - car-logs:/opt/tolerant/logs
+      # Example for custom configuration via volume:
+      - car-config:/opt/tolerant/config
+      # Example for custom data via volume
+      - car-data:/opt/tolerant/data
+      # Example for custom protocols via volume
+      - car-protocols:/opt/tolerant/protocols
+    environment:
+      - INTERNAL_IDENTITY_PROVIDER_URL=${INTERNAL_IDENTITY_PROVIDER_URL}
+      - IDENTITY_PROVIDER_URL=${IDENTITY_PROVIDER_URL}
+      - TOLERANT_CLIENT_ID=${TOLERANT_CLIENT_ID}
+      - SECURITY_ENABLED=true
+      - TOLERANT_REALM=${TOLERANT_REALM}
+      # number of processors to be used by the JVM
+      - JVM_OPT_ACTIVE_PROCESSOR_COUNT=4
+      - TZ=${TZ}
+      # If no prometheus export is wanted, set to false
+      - TL_PROMETHEUS_METRICS_ENABLED=true
+      # comment this line in to change the logging profile. possible values: anonymized, console, request, jdbc or multi-project
+      # - LOGGING_PROFILE=console
+      # if no gui is wanted, set to false
+      - GUI_ENABLED=true
+    depends_on:
+      - keycloak
+
+  gui:
+    image: ${TCAR_DOCKER_REGISTRY}/car-gui:${TCAR_VERSION}
+    restart: unless-stopped
+    environment:
+      - GUI_BASE_PATH=/carService
+      - API_BASE_PATH=/carService
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:${PROMETHEUS_VERSION}
+    volumes:
+      - type: bind
+        source: ./config/prometheus/prometheus.yml
+        target: /etc/prometheus/prometheus.yml
+        read_only: true
+      - prometheus-data:/prometheus
+    expose:
+      - 9090
+    depends_on:
+      - backend
+
+  grafana:
+    image: grafana/grafana:${GRAFANA_VERSION}
+    volumes:
+      - ./config/grafana/datasources:/etc/grafana/provisioning/datasources
+      - ./config/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - grafana-data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=tolerant
+      - GF_SECURITY_ADMIN_PASSWORD=tolerant
+    ports:
+      - ${GRAFANA_PORT}:3000
+    depends_on:
+      - prometheus
+
+  openssl:
+    image: tolerant-products/openssl
+    build: ./config/openssl
+    environment:
+      - ORGANISATION_UNIT=TOLERANT Car
+    volumes:
+      - ./config/nginx/ssl/certs:/etc/ssl/certs
+      - ./config/nginx/ssl/private:/etc/ssl/private
+
+  proxy:
+    image: nginx:${NGINX_VERSION}-alpine
+    restart: unless-stopped
+    volumes_from:
+      - openssl
+    volumes:
+      - type: bind
+        source: ./config/nginx/ssl.conf.template
+        target: /etc/nginx/templates/ssl.conf.template
+        read_only: true
+      - type: bind
+        source: ./config/nginx/locations/keycloak.loc.template
+        target: /etc/nginx/templates/keycloak.loc.template
+        read_only: true
+      - type: bind
+        source: ./config/nginx/common.loc.template
+        target: /etc/nginx/templates/common.loc.template
+        read_only: true
+      # for case of own ssl certificate
+      #- ./config/nginx/ssl/certs:/etc/ssl/certs
+      #- ./config/nginx/ssl/private:/etc/ssl/private
+
+      # persist nginx logs
+      - nginx-logs:/etc/nginx/logs
+    environment:
+      - PROXY_HOST_HTTPS_PORT=${NGINX_HTTPS_PORT}
+      - CERT_PRIVATE_KEY_FILENAME=${CERT_PRIVATE_KEY_FILENAME}
+      - CERT_FILENAME=${CERT_FILENAME}
+      # adjust the name of the server to your server name
+      - NGINX_SERVER_NAME=${NGINX_SERVER_NAME}
+      - TOLERANT_REALM=${TOLERANT_REALM}
+      # the following 2 variables are only needed if the included keycloak is to be used
+      - INTERNAL_IDENTITY_PROVIDER_URL=${INTERNAL_IDENTITY_PROVIDER_URL}
+      - INTERNAL_IDENTITY_PROVIDER_PORT=${KC_PORT}
+      - GUI_BASE_PATH=/carService
+      - SERVER_CONTEXT_PATH=/carService
+
+    ports:
+      - ${NGINX_HTTPS_PORT}:8443
+    depends_on:
+      openssl:
+        condition: service_completed_successfully
+        restart: true
+      backend:
+        condition: service_healthy
+      gui:
+        condition: service_healthy
+    extra_hosts:
+      - host.docker.internal:host-gateway
+
+  postgres:
+    image: postgres:${POSTGRES_VERSION}
+    restart: unless-stopped
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: password
+
+  keycloak:
+    image: keycloak/keycloak:${KC_VERSION}
+    command: start-dev --import-realm
+    restart: unless-stopped
+    volumes:
+      - type: bind
+        source: ./config/keycloak/import
+        target: /opt/keycloak/data/import
+        read_only: true
+    environment:
+      - KC_DB=postgres
+      - KC_DB_SCHEMA=public
+      - KC_DB_USERNAME=keycloak
+      - KC_DB_PASSWORD=password
+      - KC_DB_URL_HOST=postgres
+      - KC_DB_URL_PORT=5432
+      - KEYCLOAK_ADMIN=admin
+      - KEYCLOAK_ADMIN_PASSWORD=admin
+      - KC_HOSTNAME_PORT=${KC_PORT}
+      - KC_PROXY=edge
+      - KC_HOSTNAME_STRICT=false
+      - TOLERANT_CLIENT_ID=${TOLERANT_CLIENT_ID}
+      - TOLERANT_REALM=${TOLERANT_REALM}
+    ports:
+      - ${KC_PORT}:8080
+    depends_on:
+      - postgres
+
+
+volumes:
+  # Volume for persistent data of keycloak
+  nginx-logs:
+  car-logs:
+  grafana-data:
+  prometheus-data:
+  car-protocols:
+  # Examples for external created volumes with custom configuration and data
+  car-config:
+  #   external: true
+  car-data:
+  #   external: true
+  # Volume for persistent data of keycloak
+  postgres-data:

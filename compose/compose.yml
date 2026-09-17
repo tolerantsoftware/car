@@ -1,0 +1,112 @@
+services:
+
+  backend:
+    image: ${TCAR_DOCKER_REGISTRY}/car:${TCAR_VERSION}
+    restart: unless-stopped
+    mem_limit: 6g
+    mem_reservation: 512M
+    cpus: 4
+    # user: "$UID:$GID"
+    volumes:
+      # persist car logs
+      - car-logs:/opt/tolerant/logs
+      # Example for custom configuration via volume:
+      - car-config:/opt/tolerant/config
+      # Example for custom data via volume
+      - car-data:/opt/tolerant/data
+      # Example for custom protocols via volume
+      - car-protocols:/opt/tolerant/protocols
+    environment:
+      # number of processors to be used by the JVM
+      - JVM_OPT_ACTIVE_PROCESSOR_COUNT=4
+      - TZ=${TZ}
+      # If no prometheus export is wanted, set to false
+      - TL_PROMETHEUS_METRICS_ENABLED=true
+      # if no gui is wanted, set to false
+      - GUI_ENABLED=true
+
+  gui:
+    image: ${TCAR_DOCKER_REGISTRY}/car-gui:${TCAR_VERSION}
+    restart: unless-stopped
+    environment:
+      - GUI_BASE_PATH=/carService
+      - API_BASE_PATH=/carService
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:${PROMETHEUS_VERSION}
+    volumes:
+      - type: bind
+        source: ./config/prometheus/prometheus.yml
+        target: /etc/prometheus/prometheus.yml
+        read_only: true
+      - prometheus-data:/prometheus
+    expose:
+      - 9090
+    depends_on:
+      - backend
+
+  grafana:
+    image: grafana/grafana:${GRAFANA_VERSION}
+    volumes:
+      - ./config/grafana/datasources:/etc/grafana/provisioning/datasources
+      - ./config/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - grafana-data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=tolerant
+      - GF_SECURITY_ADMIN_PASSWORD=tolerant
+    ports:
+      - ${GRAFANA_PORT}:3000
+    depends_on:
+      - prometheus
+
+  proxy:
+    image: nginx:${NGINX_VERSION}-alpine
+    restart: unless-stopped
+    volumes:
+      - type: bind
+        source: ./config/nginx/common.loc.template
+        target: /etc/nginx/templates/common.loc.template
+        read_only: true
+      - type: bind
+        source: ./config/nginx/default.conf.template
+        target: /etc/nginx/templates/default.conf.template
+        read_only: true
+
+      # persist nginx logs
+      - nginx-logs:/etc/nginx/logs
+      # Example for ssl data in external volume
+      # nginx-ssl:/etc/nginx/ssl
+      # In case of basic auth, comment the following in
+      # - type: bind
+      #   source: ./config/nginx/htpasswd
+      #   target: /etc/nginx/htpasswd
+      #   read_only: true
+    environment:
+      - PROXY_HOST_PORT=${NGINX_PORT}
+      - GUI_BASE_PATH=/carService
+      - SERVER_CONTEXT_PATH=/carService
+
+    ports:
+      - ${NGINX_PORT}:8080 # If changed, PROXY_HOST_PORT and TOLERANT_SERVICE_URL need to be adjusted to
+    depends_on:
+      gui:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+
+
+volumes:
+  # Volume for persistent data of keycloak
+  nginx-logs:
+  car-logs:
+  grafana-data:
+  prometheus-data:
+  car-protocols:
+  # Examples for external created volumes with custom configuration and data
+  car-config:
+  #   external: true
+  car-data:
+  #   external: true
